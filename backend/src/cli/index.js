@@ -1,8 +1,8 @@
-// Modern imports
 import { Command } from "commander";
 import enqueueCommand from "./commands/enqueue.js";
 import listCommand from "./commands/list.js";
 import statusCommand from "./commands/status.js";
+import workerCommand from "./commands/worker.js";
 
 // Create CLI program
 const program = new Command();
@@ -35,5 +35,10 @@ program
   .description("Show queue status and statistics")
   .action(statusCommand);
 
+//Worker Command
+program
+  .command("worker")
+  .description("Start a worker to process jobs")
+  .action(workerCommand);
 // Parse command line arguments
 program.parse(process.argv);

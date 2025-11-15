@@ -175,7 +175,8 @@ class QueueDatabase {
       )
       RETURNING *
     `);
-
+    //returns the updated job row with RETURNING *
+    //function return the updated job object
     return stmt.get(workerId, now, now, now);
   }
 
