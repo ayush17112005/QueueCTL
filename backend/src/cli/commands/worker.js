@@ -1,33 +1,23 @@
-import QueueDatabase from "../../storage/database.js";
-import Worker from "../../worker/worker.js";
+import WorkerManager from "../../worker/manager.js";
 
-// Command to start a single worker
-async function workerCommand(options) {
-  console.log("Starting worker...\n");
+//Worker Start Command
+const workerStartCommand = async (options) => {
+  const count = parseInt(options.count) || 1;
 
-  // Initialize database
-  const db = new QueueDatabase();
+  const manager = new WorkerManager();
+  manager.startWorkers(count);
 
-  // Create worker
-  const worker = new Worker("worker-1", db);
+  //Keep the process running
+  //Workers run in background, main process just wait
+  process.stdin.resume();
+};
 
-  // Handle Ctrl+C gracefully
-  process.on("SIGINT", () => {
-    console.log("\n\n⚠️  Received shutdown signal...");
-    worker.stop();
+//Worker stop Command
+const workerStopCommand = async () => {
+  console.log(
+    "⚠️  To stop workers, press Ctrl+C in the terminal where they are running"
+  );
+  console.log("   Or use: kill <PID>");
+};
 
-    // Give worker time to finish current job
-    setTimeout(() => {
-      db.close();
-      process.exit(0);
-    }, 2000);
-  });
-
-  // Start the worker (runs forever until Ctrl+C)
-  await worker.start();
-
-  // Cleanup when worker stops
-  db.close();
-}
-
-export default workerCommand;
+export { workerStartCommand, workerStopCommand };

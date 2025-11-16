@@ -2,43 +2,42 @@ import { Command } from "commander";
 import enqueueCommand from "./commands/enqueue.js";
 import listCommand from "./commands/list.js";
 import statusCommand from "./commands/status.js";
-import workerCommand from "./commands/worker.js";
+import { workerStartCommand, workerStopCommand } from "./commands/worker.js";
 
-// Create CLI program
 const program = new Command();
 
-// Setup program info
 program
   .name("queuectl")
   .description("CLI-based background job queue system")
   .version("1.0.0");
 
-// Enqueue command
 program
   .command("enqueue <job>")
   .description("Add a new job to the queue")
   .action(enqueueCommand);
 
-// List command
 program
   .command("list")
   .description("List jobs in the queue")
-  .option(
-    "-s, --state <state>",
-    "Filter by state (pending|processing|completed|failed|dead)"
-  )
+  .option("-s, --state <state>", "Filter by state")
   .action(listCommand);
 
-// Status command
 program
   .command("status")
   .description("Show queue status and statistics")
   .action(statusCommand);
 
-//Worker Command
+// Changed: worker-start instead of "worker start"
 program
-  .command("worker")
-  .description("Start a worker to process jobs")
-  .action(workerCommand);
-// Parse command line arguments
+  .command("worker-start")
+  .description("Start worker processes")
+  .option("-c, --count <number>", "Number of workers to start", "1")
+  .action(workerStartCommand);
+
+// Changed: worker-stop instead of "worker stop"
+program
+  .command("worker-stop")
+  .description("Stop all workers")
+  .action(workerStopCommand);
+
 program.parse(process.argv);
