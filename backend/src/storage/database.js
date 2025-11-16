@@ -25,7 +25,7 @@ class QueueDatabase {
 
   // Create database tables
   migrate() {
-    // Create jobs table
+    // Create jobs table if it doesn't exist
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS jobs (
         id TEXT PRIMARY KEY,
@@ -33,40 +33,46 @@ class QueueDatabase {
         state TEXT NOT NULL DEFAULT 'pending',
         attempts INTEGER DEFAULT 0,
         max_retries INTEGER DEFAULT 3,
-        
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
-        next_retry_at TEXT,
-        
-        worker_id TEXT,
-        started_at TEXT,
+        claimed_by TEXT,
+        claimed_at TEXT,
         completed_at TEXT,
-        
         exit_code INTEGER,
         output TEXT,
         error TEXT
       )
     `);
 
-    // Create config table
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS config (
-        key TEXT PRIMARY KEY,
-        value TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      )
-    `);
+    // Check if retry columns exist, add them if not
+    try {
+      this.db.exec(`
+        ALTER TABLE jobs ADD COLUMN last_error TEXT;
+      `);
+      console.log("✓ Added last_error column");
+    } catch (e) {
+      // Column already exists, ignore
+    }
 
-    // Create indexes for faster searching
-    this.db.exec(`
-      CREATE INDEX IF NOT EXISTS idx_jobs_state ON jobs(state);
-    `);
+    try {
+      this.db.exec(`
+        ALTER TABLE jobs ADD COLUMN retry_at TEXT;
+      `);
+      console.log("✓ Added retry_at column");
+    } catch (e) {
+      // Column already exists, ignore
+    }
 
-    this.db.exec(`
-      CREATE INDEX IF NOT EXISTS idx_jobs_next_retry ON jobs(next_retry_at);
-    `);
+    try {
+      this.db.exec(`
+        ALTER TABLE jobs ADD COLUMN backoff_multiplier INTEGER DEFAULT 2;
+      `);
+      console.log("✓ Added backoff_multiplier column");
+    } catch (e) {
+      // Column already exists, ignore
+    }
 
-    // console.log("✓ Database initialized");
+    console.log("✓ Database initialized");
   }
 
   // Add a new job to database
@@ -129,29 +135,22 @@ class QueueDatabase {
     return stmt.all(...params);
   }
 
-  // Update a job's state and metadata
-  updateJobState(jobId, state, metadata = {}) {
-    // Combine state and metadata
+  // Update job state
+  updateJobState(jobId, state, fields = {}) {
     const updates = {
-      state: state,
+      state,
       updated_at: new Date().toISOString(),
-      ...metadata,
+      ...fields,
     };
 
-    // Build dynamic SQL
-    const fields = Object.keys(updates)
-      .map((key) => `${key} = ?`)
-      .join(", ");
-    const values = Object.values(updates);
+    const columns = Object.keys(updates).join(" = ?, ") + " = ?";
+    const values = [...Object.values(updates), jobId];
 
-    // Execute update
     const stmt = this.db.prepare(`
-      UPDATE jobs SET ${fields} WHERE id = ?
+      UPDATE jobs SET ${columns} WHERE id = ?
     `);
 
-    stmt.run(...values, jobId);
-
-    return this.getJob(jobId);
+    stmt.run(...values);
   }
 
   // ATOMIC: Claim a job for a worker (prevents race conditions!)
@@ -160,24 +159,71 @@ class QueueDatabase {
 
     // Find and claim a pending job in ONE atomic operation
     const stmt = this.db.prepare(`
-      UPDATE jobs 
+      UPDATE jobs
       SET 
         state = 'processing',
-        worker_id = ?,
-        started_at = ?,
+        claimed_by = ?,
+        claimed_at = ?,
         updated_at = ?
       WHERE id = (
-        SELECT id FROM jobs 
-        WHERE state = 'pending' 
-          AND (next_retry_at IS NULL OR next_retry_at <= ?)
+        SELECT id FROM jobs
+        WHERE state = 'pending'
+        AND (retry_at IS NULL OR retry_at <= ?)
         ORDER BY created_at ASC
         LIMIT 1
       )
       RETURNING *
     `);
-    //returns the updated job row with RETURNING *
-    //function return the updated job object
+
     return stmt.get(workerId, now, now, now);
+  }
+
+  // Calculate exponential backoff delay
+  calculateRetryDelay(attempts, multiplier = 2) {
+    // Exponential backoff: 2^attempts seconds
+    // Attempt 0: 2^0 = 1 second
+    // Attempt 1: 2^1 = 2 seconds
+    // Attempt 2: 2^2 = 4 seconds
+    // Attempt 3: 2^3 = 8 seconds
+    const delaySeconds = Math.pow(multiplier, attempts);
+
+    // Cap at 60 seconds max to avoid crazy long waits
+    return Math.min(delaySeconds, 60);
+  }
+
+  // Schedule a job for retry with exponential backoff
+  scheduleRetry(jobId, attempts, error) {
+    const delay = this.calculateRetryDelay(attempts);
+    const retryAt = new Date(Date.now() + delay * 1000).toISOString();
+    const now = new Date().toISOString();
+
+    // FIXED: Added retry_at to the UPDATE and correct parameter order
+    const stmt = this.db.prepare(`
+      UPDATE jobs 
+      SET
+        state = ?,
+        attempts = ?,
+        retry_at = ?,
+        last_error = ?,
+        updated_at = ?
+      WHERE id = ?
+    `);
+
+    // FIXED: Parameters match the SQL placeholders in order
+    stmt.run(
+      "pending", // state
+      attempts, // attempts
+      retryAt, // retry_at  ← NOW INCLUDED!
+      error, // last_error
+      now, // updated_at
+      jobId // id (WHERE clause)
+    );
+
+    console.log(
+      `📅 Job ${jobId} scheduled for retry in ${delay} seconds (attempt ${attempts})`
+    );
+
+    return delay;
   }
 
   // Get statistics (count by state)
@@ -229,6 +275,33 @@ class QueueDatabase {
     `);
 
     stmt.run(key, value, now);
+  }
+
+  // Auto-recover stuck jobs (been processing too long)
+  recoverStuckJobs(timeoutMinutes = 5) {
+    const timeoutMs = timeoutMinutes * 60 * 1000;
+    const cutoffTime = new Date(Date.now() - timeoutMs).toISOString();
+
+    const stmt = this.db.prepare(`
+    UPDATE jobs
+    SET 
+      state = 'pending',
+      claimed_by = NULL,
+      claimed_at = NULL,
+      updated_at = ?
+    WHERE state = 'processing'
+    AND claimed_at < ?
+  `);
+
+    const result = stmt.run(new Date().toISOString(), cutoffTime);
+
+    if (result.changes > 0) {
+      console.log(
+        `⚠️  Auto-recovered ${result.changes} stuck job(s) (processing > ${timeoutMinutes} min)`
+      );
+    }
+
+    return result.changes;
   }
 
   // Close database connection

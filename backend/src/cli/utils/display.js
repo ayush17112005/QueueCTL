@@ -55,12 +55,22 @@ class Display {
   // Display stats as a table
   static statsTable(stats) {
     const table = new Table({
-      head: [chalk.cyan("State"), chalk.cyan("Count")],
+      head: ["State", "Count"],
+      style: { head: ["cyan"] },
     });
 
-    // Add each state as a row
-    Object.entries(stats).forEach(([state, count]) => {
-      table.push([this.colorState(state), count]);
+    // Make sure we include all states
+    const stateCounts = {
+      pending: 0,
+      processing: 0,
+      completed: 0,
+      failed: 0,
+      dead: 0, // ← Make sure this is here!
+      ...stats,
+    };
+
+    Object.entries(stateCounts).forEach(([state, count]) => {
+      table.push([state, count]);
     });
 
     console.log(table.toString());
