@@ -304,6 +304,148 @@ class QueueDatabase {
     return result.changes;
   }
 
+  // Get all dead jobs
+  getDeadJobs() {
+    const stmt = this.db.prepare(`
+    SELECT * FROM jobs 
+    WHERE state = 'dead'
+    ORDER BY updated_at DESC
+  `);
+
+    return stmt.all();
+  }
+
+  // Get a specific dead job by ID
+  getDeadJob(jobId) {
+    const stmt = this.db.prepare(`
+    SELECT * FROM jobs 
+    WHERE id = ? AND state = 'dead'
+  `);
+
+    return stmt.get(jobId);
+  }
+
+  // Retry a dead job (reset to pending with fresh attempts)
+  retryDeadJob(jobId) {
+    const job = this.getDeadJob(jobId);
+
+    if (!job) {
+      throw new Error(`Job ${jobId} not found in Dead Letter Queue`);
+    }
+
+    const stmt = this.db.prepare(`
+    UPDATE jobs
+    SET
+      state = 'pending',
+      attempts = 0,
+      retry_at = NULL,
+      claimed_by = NULL,
+      claimed_at = NULL,
+      updated_at = ?
+    WHERE id = ?
+  `);
+
+    stmt.run(new Date().toISOString(), jobId);
+
+    console.log(
+      `♻️  Job ${jobId} moved from DEAD to PENDING (reset attempts to 0)`
+    );
+
+    return this.getJob(jobId);
+  }
+
+  // Retry ALL dead jobs
+  retryAllDeadJobs() {
+    const stmt = this.db.prepare(`
+    UPDATE jobs
+    SET
+      state = 'pending',
+      attempts = 0,
+      retry_at = NULL,
+      claimed_by = NULL,
+      claimed_at = NULL,
+      updated_at = ?
+    WHERE state = 'dead'
+  `);
+
+    const result = stmt.run(new Date().toISOString());
+
+    console.log(`♻️  Moved ${result.changes} job(s) from DEAD to PENDING`);
+
+    return result.changes;
+  }
+
+  // Delete a dead job permanently
+  deleteDeadJob(jobId) {
+    const job = this.getDeadJob(jobId);
+
+    if (!job) {
+      throw new Error(`Job ${jobId} not found in Dead Letter Queue`);
+    }
+
+    const stmt = this.db.prepare(`
+    DELETE FROM jobs WHERE id = ?
+  `);
+
+    stmt.run(jobId);
+
+    console.log(`🗑️  Permanently deleted job ${jobId} from Dead Letter Queue`);
+
+    return true;
+  }
+
+  // Clear entire DLQ (delete all dead jobs)
+  clearDeadLetterQueue() {
+    const stmt = this.db.prepare(`
+    DELETE FROM jobs WHERE state = 'dead'
+  `);
+
+    const result = stmt.run();
+
+    console.log(
+      `🗑️  Cleared Dead Letter Queue (deleted ${result.changes} job(s))`
+    );
+
+    return result.changes;
+  }
+
+  // Get DLQ statistics
+  getDeadJobStats() {
+    // Total count
+    const countStmt = this.db.prepare(`
+    SELECT COUNT(*) as total FROM jobs WHERE state = 'dead'
+  `);
+    const { total } = countStmt.get();
+
+    // Most common errors
+    const errorsStmt = this.db.prepare(`
+    SELECT 
+      last_error,
+      COUNT(*) as count
+    FROM jobs
+    WHERE state = 'dead' AND last_error IS NOT NULL
+    GROUP BY last_error
+    ORDER BY count DESC
+    LIMIT 5
+  `);
+    const commonErrors = errorsStmt.all();
+
+    // Oldest dead job
+    const oldestStmt = this.db.prepare(`
+    SELECT updated_at FROM jobs 
+    WHERE state = 'dead'
+    ORDER BY updated_at ASC
+    LIMIT 1
+  `);
+    const oldest = oldestStmt.get();
+
+    return {
+      total,
+      commonErrors,
+      oldestDeadJob: oldest ? oldest.updated_at : null,
+    };
+  }
+
   // Close database connection
   close() {
     this.db.close();
